@@ -514,34 +514,67 @@ function shootWeb(hand, idx) {
     createParticles(palm, themes[currentTheme](time, 1, 1), 15);
 }
 
-function drawAnchorWeb(target, origin, color) {
-    const dx = origin.x - target.x;
-    const dy = origin.y - target.y;
-    const len = Math.hypot(dx, dy) || 1;
-    const normalX = -dy / len;
-    const normalY = dx / len;
-    
-    ctx.strokeStyle = currentTheme === 'Spider' ? '#d5f4ff' : color;
-    ctx.lineWidth = 1.5;
-    
-    // Draw 3 layers of anchoring arcs
-    for (let j = 1; j <= 3; j++) {
-        const dist = j * 30;
-        const p1 = { x: target.x + normalX * dist + (origin.x - target.x) * 0.1, y: target.y + normalY * dist + (origin.y - target.y) * 0.1 };
-        const p2 = { x: target.x - normalX * dist + (origin.x - target.x) * 0.1, y: target.y - normalY * dist + (origin.y - target.y) * 0.1 };
-        
+/**
+ * Draws a flat, front-facing 2D radial spider web centered at `center`.
+ * 8 spokes radiate outward, connected by 5 concentric curved rings —
+ * a classic comic-book spider web, always face-on regardless of shoot angle.
+ */
+function drawFlatSpiderWeb(center, color) {
+    const col = currentTheme === 'Spider' ? '#d5f4ff' : color;
+    const NUM_SPOKES = 8;
+    const NUM_RINGS  = 5;
+    const MAX_RADIUS = 120;
+
+    ctx.save();
+    ctx.shadowBlur  = 18;
+    ctx.shadowColor = col;
+    ctx.strokeStyle = col;
+    ctx.globalAlpha = 0.92;
+
+    // 1. Radial spokes
+    ctx.lineWidth = 1.8;
+    ctx.beginPath();
+    for (let s = 0; s < NUM_SPOKES; s++) {
+        const angle = (s / NUM_SPOKES) * Math.PI * 2;
+        ctx.moveTo(center.x, center.y);
+        ctx.lineTo(
+            center.x + Math.cos(angle) * MAX_RADIUS,
+            center.y + Math.sin(angle) * MAX_RADIUS
+        );
+    }
+    ctx.stroke();
+
+    // 2. Concentric curved rings
+    for (let r = 1; r <= NUM_RINGS; r++) {
+        const radius = (r / NUM_RINGS) * MAX_RADIUS;
+        ctx.lineWidth = r === 1 ? 2.2 : 1.2;
         ctx.beginPath();
-        ctx.moveTo(p1.x, p1.y);
-        ctx.quadraticCurveTo(target.x + (origin.x - target.x) * 0.02, target.y + (origin.y - target.y) * 0.02, p2.x, p2.y);
-        ctx.stroke();
-        
-        ctx.beginPath();
-        ctx.moveTo(target.x, target.y);
-        ctx.lineTo(p1.x, p1.y);
-        ctx.moveTo(target.x, target.y);
-        ctx.lineTo(p2.x, p2.y);
+        for (let s = 0; s < NUM_SPOKES; s++) {
+            const a1 = (s / NUM_SPOKES) * Math.PI * 2;
+            const a2 = ((s + 1) / NUM_SPOKES) * Math.PI * 2;
+            const aMid = (a1 + a2) / 2;
+            const p1x = center.x + Math.cos(a1) * radius;
+            const p1y = center.y + Math.sin(a1) * radius;
+            const p2x = center.x + Math.cos(a2) * radius;
+            const p2y = center.y + Math.sin(a2) * radius;
+            // Control point pulled slightly inward for a natural sag
+            const cpR = radius * 0.85;
+            const cpX = center.x + Math.cos(aMid) * cpR;
+            const cpY = center.y + Math.sin(aMid) * cpR;
+            if (s === 0) ctx.moveTo(p1x, p1y);
+            ctx.quadraticCurveTo(cpX, cpY, p2x, p2y);
+        }
+        ctx.closePath();
         ctx.stroke();
     }
+
+    // 3. Bright center dot
+    ctx.fillStyle = col;
+    ctx.beginPath();
+    ctx.arc(center.x, center.y, 4, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.restore();
 }
 
 function createWebParticles(pos, color, count = 2) {
@@ -593,34 +626,28 @@ function updateAndDrawWebs(dt) {
             web.tethered = false;
         }
         
-        const currentEndX = web.origin.x + (web.target.x - web.origin.x) * web.progress;
-        const currentEndY = web.origin.y + (web.target.y - web.origin.y) * web.progress;
-        
         const col = web.color;
         ctx.shadowColor = currentTheme === 'Spider' ? '#d5f4ff' : col;
         ctx.strokeStyle = currentTheme === 'Spider' ? '#d5f4ff' : col;
-        ctx.lineWidth = web.tethered ? 5 : 2;
         
-        // Draw main line
-        ctx.beginPath();
-        ctx.moveTo(web.origin.x, web.origin.y);
-        ctx.lineTo(currentEndX, currentEndY);
-        ctx.stroke();
-        
-        // If tethered and fully shot, draw anchor webbing on screen edge
-        if (web.tethered && web.progress >= 1) {
-            drawAnchorWeb(web.target, web.origin, col);
+        // Shoot phase: show shooting line
+        if (web.progress < 1) {
+            const currentEndX = web.origin.x + (web.target.x - web.origin.x) * web.progress;
+            const currentEndY = web.origin.y + (web.target.y - web.origin.y) * web.progress;
+            ctx.lineWidth = 4;
+            ctx.beginPath();
+            ctx.moveTo(web.origin.x, web.origin.y);
+            ctx.lineTo(currentEndX, currentEndY);
+            ctx.stroke();
+        } else if (web.stuckTimer > 0) {
+            // Screen impact phase: the line vanishes, only show the flat spider web stuck on the screen
+            drawFlatSpiderWeb(web.target, col);
         }
         
-        // If web is released (untethered), snap and retract
-        if (!web.tethered) {
-            if (Math.random() > 0.3) {
-                createWebParticles(web.origin, col, 2);
-            }
-            web.progress -= 5 * dt; // Retract speed
-            if (web.progress <= 0) {
-                thrownWebs.splice(i, 1);
-            }
+        // Once stuck timer expires, dissolve the web
+        if (web.stuckTimer <= 0) {
+            createWebParticles(web.target, col, 8);
+            thrownWebs.splice(i, 1);
         }
     }
     
