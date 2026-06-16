@@ -241,7 +241,7 @@ const themes = {
     'Lava':      (t, index, total) => `hsl(${(10 + (index * 10)) % 40}, 100%, ${50 + Math.sin(t)*10}%)`,
     'Ocean':     (t, index, total) => `hsl(${180 + (index * 20)}, 100%, 60%)`,
     'Galaxy':    (t, index, total) => `hsl(${260 + Math.sin(t*2 + index)*40}, 100%, 65%)`,
-    'Spider':    (t, index, total) => (index % 2 === 0) ? '#d5f4ff' : '#ff0033'
+    'Spider':    (t, index, total) => '#d5f4ff'
 };
 
 // Physics Engines Data
@@ -408,7 +408,7 @@ function triggerThwipSound() {
 
 function updateHum(activeHands) {
     if (!audioCtx || !humGain) return;
-    if (activeHands.length < 2) {
+    if (activeHands.length < 2 || currentTheme === 'Spider') {
         humGain.gain.setTargetAtTime(0, audioCtx.currentTime, 0.1);
         return;
     }
@@ -420,12 +420,12 @@ function updateHum(activeHands) {
     const dy = p1.y - p2.y;
     const dist = Math.sqrt(dx*dx + dy*dy);
     
-    // The closer they are, the higher the pitch and volume
-    const targetFreq = 100 + (1 - Math.min(dist, 1)) * 300;
-    const targetVolume = 0.05 + (1 - Math.min(dist, 1)) * 0.15;
+    // The closer they are, the higher the pitch and volume (subtle deep rumble)
+    const targetFreq = 55 + (1 - Math.min(dist, 1)) * 45; // 55Hz to 100Hz
+    const targetVolume = 0.003 + (1 - Math.min(dist, 1)) * 0.012; // warm, extremely subtle volume
     
-    humOsc.frequency.setTargetAtTime(targetFreq, audioCtx.currentTime, 0.1);
-    humGain.gain.setTargetAtTime(targetVolume, audioCtx.currentTime, 0.1);
+    humOsc.frequency.setTargetAtTime(targetFreq, audioCtx.currentTime, 0.15);
+    humGain.gain.setTargetAtTime(targetVolume, audioCtx.currentTime, 0.15);
 }
 
 /**
@@ -498,13 +498,14 @@ function shootWeb(hand, idx) {
         targetY = height;
     }
     
-    // Add the web object
+    // Add the web object with a 2.0-second stuck duration
     thrownWebs.push({
         handIdx: idx,
         origin: { x: palm.x, y: palm.y },
         target: { x: targetX, y: targetY },
         progress: 0, // 0 to 1 shoot animation
         tethered: true,
+        stuckTimer: 2.0, // Stays stuck to screen for 2.0 seconds
         age: 0,
         color: themes[currentTheme](time, 1, 1)
     });
@@ -557,34 +558,39 @@ function createWebParticles(pos, color, count = 2) {
     }
 }
 
-function updateAndDrawWebs() {
+function updateAndDrawWebs(dt) {
     ctx.save();
     ctx.shadowBlur = 15;
     
     // 1. Update and draw thrown webs
     for (let i = thrownWebs.length - 1; i >= 0; i--) {
         const web = thrownWebs[i];
-        web.age += 0.016;
-        
-        // Find corresponding hand
-        let hand = currentHands[web.handIdx];
-        if (hand) {
-            const palm = mapToCanvas(hand[9]);
-            web.origin.x = palm.x;
-            web.origin.y = palm.y;
-        } else {
-            web.tethered = false;
-        }
-        
-        // Check if hand is still thwiping
-        if (hand && !lastThwipState[web.handIdx]) {
-            web.tethered = false;
-        }
+        web.age += dt;
         
         // Progress the shoot animation
         if (web.progress < 1) {
-            web.progress += 0.18; // Shoot speed
+            web.progress += 10 * dt; // Shoot speed (takes ~100ms)
             if (web.progress > 1) web.progress = 1;
+        }
+
+        // Timer counts down once the web reaches the screen target
+        if (web.progress >= 1) {
+            web.stuckTimer -= dt;
+        }
+        
+        // Find corresponding hand
+        let hand = currentHands[web.handIdx];
+        
+        // Web remains active and tethered for 2 seconds
+        if (web.stuckTimer > 0) {
+            web.tethered = true;
+            if (hand) {
+                const palm = mapToCanvas(hand[9]);
+                web.origin.x = palm.x;
+                web.origin.y = palm.y;
+            }
+        } else {
+            web.tethered = false;
         }
         
         const currentEndX = web.origin.x + (web.target.x - web.origin.x) * web.progress;
@@ -601,17 +607,17 @@ function updateAndDrawWebs() {
         ctx.lineTo(currentEndX, currentEndY);
         ctx.stroke();
         
-        // If tethered and fully shot, draw some cross-webs / cobweb anchors at the screen boundary
+        // If tethered and fully shot, draw anchor webbing on screen edge
         if (web.tethered && web.progress >= 1) {
             drawAnchorWeb(web.target, web.origin, col);
         }
         
-        // If web is released (untethered), it snaps and fades away
+        // If web is released (untethered), snap and retract
         if (!web.tethered) {
             if (Math.random() > 0.3) {
                 createWebParticles(web.origin, col, 2);
             }
-            web.progress -= 0.08;
+            web.progress -= 5 * dt; // Retract speed
             if (web.progress <= 0) {
                 thrownWebs.splice(i, 1);
             }
@@ -913,7 +919,7 @@ function renderLoop(timestamp) {
 
     // Render Physics layer
     updatePhysics();
-    updateAndDrawWebs();
+    updateAndDrawWebs(dt);
 
     // Process Hand Logic if present
     if (currentHands.length > 0) {
