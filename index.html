@@ -55,7 +55,7 @@
         /* 
          * Background Canvas captures the video frame and applies the matrix rain/starfield 
          */
-        #bgCanvas, #mainCanvas {
+        #bgCanvas, #mainCanvas, #webCanvas {
             position: absolute;
             top: 0;
             left: 0;
@@ -67,6 +67,12 @@
         
         #bgCanvas {
             z-index: 1;
+            pointer-events: none;
+        }
+
+        /* Web canvas sits BETWEEN bg and main so it doesn't fight screen blend */
+        #webCanvas {
+            z-index: 3;
             pointer-events: none;
         }
 
@@ -188,6 +194,7 @@
     <div class="video-container">
         <video class="input_video" autoplay playsinline></video>
         <canvas id="bgCanvas"></canvas>
+        <canvas id="webCanvas"></canvas>
         <canvas id="mainCanvas"></canvas>
     </div>
 
@@ -218,8 +225,10 @@
  */
 const videoElement = document.querySelector('.input_video');
 const bgCanvas = document.getElementById('bgCanvas');
+const webCanvas = document.getElementById('webCanvas');
 const mainCanvas = document.getElementById('mainCanvas');
 const bgCtx = bgCanvas.getContext('2d');
+const webCtx = webCanvas.getContext('2d');
 const ctx = mainCanvas.getContext('2d');
 
 let width = window.innerWidth;
@@ -279,6 +288,8 @@ function resize() {
     height = window.innerHeight;
     bgCanvas.width = width;
     bgCanvas.height = height;
+    webCanvas.width = width;
+    webCanvas.height = height;
     mainCanvas.width = width;
     mainCanvas.height = height;
     
@@ -503,9 +514,10 @@ function shootWeb(hand, idx) {
         handIdx: idx,
         origin: { x: palm.x, y: palm.y },
         target: { x: targetX, y: targetY },
-        progress: 0, // 0 to 1 shoot animation
+        progress: 0,       // 0→1: shooting line animation
         tethered: true,
-        stuckTimer: 2.0, // Stays stuck to screen for 2.0 seconds
+        stuckTimer: 2.0,   // Counts down once web lands
+        growScale: 0,      // 0→1: web grow-in animation
         age: 0,
         color: themes[currentTheme](time, 1, 1)
     });
@@ -515,66 +527,77 @@ function shootWeb(hand, idx) {
 }
 
 /**
- * Draws a flat, front-facing 2D radial spider web centered at `center`.
- * 8 spokes radiate outward, connected by 5 concentric curved rings —
- * a classic comic-book spider web, always face-on regardless of shoot angle.
+ * Draws a detailed, front-facing 2D radial spider web centered at `center`.
+ * Uses webCtx (dedicated canvas). Supports scale (grow-in) and alpha (fade-out).
+ * 10 spokes, 7 concentric rings with natural Bezier sag — comic-book style.
  */
-function drawFlatSpiderWeb(center, color) {
-    const col = currentTheme === 'Spider' ? '#d5f4ff' : color;
-    const NUM_SPOKES = 8;
-    const NUM_RINGS  = 5;
-    const MAX_RADIUS = 120;
+function drawFlatSpiderWeb(center, col, scale, alpha) {
+    const NUM_SPOKES = 10;
+    const NUM_RINGS  = 7;
+    const MAX_RADIUS = Math.min(width, height) * 0.28; // ~28% of shortest screen dim
 
-    ctx.save();
-    ctx.shadowBlur  = 18;
-    ctx.shadowColor = col;
-    ctx.strokeStyle = col;
-    ctx.globalAlpha = 0.92;
+    webCtx.save();
+    webCtx.translate(center.x, center.y);
+    webCtx.scale(scale, scale);
+    webCtx.globalAlpha = alpha;
 
-    // 1. Radial spokes
-    ctx.lineWidth = 1.8;
-    ctx.beginPath();
+    webCtx.shadowBlur  = 22;
+    webCtx.shadowColor = col;
+    webCtx.strokeStyle = col;
+
+    // ── 1. Radial spokes ──────────────────────────────────────────────────────
+    webCtx.lineWidth = 2.2;
+    webCtx.beginPath();
     for (let s = 0; s < NUM_SPOKES; s++) {
-        const angle = (s / NUM_SPOKES) * Math.PI * 2;
-        ctx.moveTo(center.x, center.y);
-        ctx.lineTo(
-            center.x + Math.cos(angle) * MAX_RADIUS,
-            center.y + Math.sin(angle) * MAX_RADIUS
+        const angle = (s / NUM_SPOKES) * Math.PI * 2 - Math.PI / 2; // start at top
+        webCtx.moveTo(0, 0);
+        webCtx.lineTo(
+            Math.cos(angle) * MAX_RADIUS,
+            Math.sin(angle) * MAX_RADIUS
         );
     }
-    ctx.stroke();
+    webCtx.stroke();
 
-    // 2. Concentric curved rings
+    // ── 2. Concentric curved rings ─────────────────────────────────────────────
     for (let r = 1; r <= NUM_RINGS; r++) {
-        const radius = (r / NUM_RINGS) * MAX_RADIUS;
-        ctx.lineWidth = r === 1 ? 2.2 : 1.2;
-        ctx.beginPath();
+        const t      = r / NUM_RINGS;            // 0→1 from center to edge
+        const radius = t * MAX_RADIUS;
+
+        // Thicker outer rings, thinner inner rings — like a real web
+        webCtx.lineWidth = 0.8 + t * 2.0;
+
+        webCtx.beginPath();
         for (let s = 0; s < NUM_SPOKES; s++) {
-            const a1 = (s / NUM_SPOKES) * Math.PI * 2;
-            const a2 = ((s + 1) / NUM_SPOKES) * Math.PI * 2;
+            const a1   = (s / NUM_SPOKES) * Math.PI * 2 - Math.PI / 2;
+            const a2   = ((s + 1) / NUM_SPOKES) * Math.PI * 2 - Math.PI / 2;
             const aMid = (a1 + a2) / 2;
-            const p1x = center.x + Math.cos(a1) * radius;
-            const p1y = center.y + Math.sin(a1) * radius;
-            const p2x = center.x + Math.cos(a2) * radius;
-            const p2y = center.y + Math.sin(a2) * radius;
-            // Control point pulled slightly inward for a natural sag
-            const cpR = radius * 0.85;
-            const cpX = center.x + Math.cos(aMid) * cpR;
-            const cpY = center.y + Math.sin(aMid) * cpR;
-            if (s === 0) ctx.moveTo(p1x, p1y);
-            ctx.quadraticCurveTo(cpX, cpY, p2x, p2y);
+
+            const p1x = Math.cos(a1) * radius;
+            const p1y = Math.sin(a1) * radius;
+            const p2x = Math.cos(a2) * radius;
+            const p2y = Math.sin(a2) * radius;
+
+            // Control point pulled inward (toward center) to create the natural concave sag
+            const sagAmount = 0.78 - t * 0.08; // less sag on outer rings
+            const cpX = Math.cos(aMid) * radius * sagAmount;
+            const cpY = Math.sin(aMid) * radius * sagAmount;
+
+            if (s === 0) webCtx.moveTo(p1x, p1y);
+            webCtx.quadraticCurveTo(cpX, cpY, p2x, p2y);
         }
-        ctx.closePath();
-        ctx.stroke();
+        webCtx.closePath();
+        webCtx.stroke();
     }
 
-    // 3. Bright center dot
-    ctx.fillStyle = col;
-    ctx.beginPath();
-    ctx.arc(center.x, center.y, 4, 0, Math.PI * 2);
-    ctx.fill();
+    // ── 3. Bright glowing center dot ──────────────────────────────────────────
+    webCtx.fillStyle = '#ffffff';
+    webCtx.shadowBlur = 30;
+    webCtx.shadowColor = col;
+    webCtx.beginPath();
+    webCtx.arc(0, 0, 5, 0, Math.PI * 2);
+    webCtx.fill();
 
-    ctx.restore();
+    webCtx.restore();
 }
 
 function createWebParticles(pos, color, count = 2) {
@@ -592,29 +615,39 @@ function createWebParticles(pos, color, count = 2) {
 }
 
 function updateAndDrawWebs(dt) {
+    // Clear the dedicated web canvas each frame
+    webCtx.clearRect(0, 0, width, height);
+
+    const GROW_SPEED   = 4.0;   // How fast the web grows in (scale 0→1 in ~0.25s)
+    const FADE_START   = 0.55;  // When stuckTimer < this, start fading (out of 2.0s)
+
+    // ── 1. Shooting line drawn on mainCanvas ──────────────────────────────────
     ctx.save();
     ctx.shadowBlur = 15;
-    
-    // 1. Update and draw thrown webs
+
     for (let i = thrownWebs.length - 1; i >= 0; i--) {
         const web = thrownWebs[i];
         web.age += dt;
-        
-        // Progress the shoot animation
+
+        // Advance shoot-line progress
         if (web.progress < 1) {
-            web.progress += 10 * dt; // Shoot speed (takes ~100ms)
+            web.progress += 10 * dt;
             if (web.progress > 1) web.progress = 1;
         }
 
-        // Timer counts down once the web reaches the screen target
+        // Start countdown once web lands
         if (web.progress >= 1) {
             web.stuckTimer -= dt;
+
+            // Grow web in over first ~0.25 s
+            if (web.growScale < 1) {
+                web.growScale += GROW_SPEED * dt;
+                if (web.growScale > 1) web.growScale = 1;
+            }
         }
-        
-        // Find corresponding hand
+
+        // Update tethered origin to follow the hand
         let hand = currentHands[web.handIdx];
-        
-        // Web remains active and tethered for 2 seconds
         if (web.stuckTimer > 0) {
             web.tethered = true;
             if (hand) {
@@ -625,39 +658,61 @@ function updateAndDrawWebs(dt) {
         } else {
             web.tethered = false;
         }
-        
-        const col = web.color;
-        ctx.shadowColor = currentTheme === 'Spider' ? '#d5f4ff' : col;
-        ctx.strokeStyle = currentTheme === 'Spider' ? '#d5f4ff' : col;
-        
-        // Shoot phase: show shooting line
+
+        const col = currentTheme === 'Spider' ? '#d5f4ff' : web.color;
+        ctx.shadowColor = col;
+        ctx.strokeStyle = col;
+
+        // ── Shoot phase: animated line from palm to target ──
         if (web.progress < 1) {
-            const currentEndX = web.origin.x + (web.target.x - web.origin.x) * web.progress;
-            const currentEndY = web.origin.y + (web.target.y - web.origin.y) * web.progress;
+            const ex = web.origin.x + (web.target.x - web.origin.x) * web.progress;
+            const ey = web.origin.y + (web.target.y - web.origin.y) * web.progress;
             ctx.lineWidth = 4;
             ctx.beginPath();
             ctx.moveTo(web.origin.x, web.origin.y);
-            ctx.lineTo(currentEndX, currentEndY);
+            ctx.lineTo(ex, ey);
             ctx.stroke();
+
         } else if (web.stuckTimer > 0) {
-            // Screen impact phase: the line vanishes, only show the flat spider web stuck on the screen
-            drawFlatSpiderWeb(web.target, col);
+            // ── Stuck phase: draw rich spider web on webCanvas ──
+
+            // Calculate alpha: full opacity → start fading during last FADE_START seconds
+            let alpha;
+            if (web.stuckTimer > FADE_START) {
+                alpha = 1.0;
+            } else {
+                alpha = Math.max(0, web.stuckTimer / FADE_START); // linear fade to 0
+            }
+
+            // Position: where the web sticks — centered on screen, slightly pulled toward target
+            // Place the web at target but clamp it so it appears fully on screen
+            const webRadius = Math.min(width, height) * 0.28;
+            const cx = Math.min(Math.max(web.target.x, webRadius), width  - webRadius);
+            const cy = Math.min(Math.max(web.target.y, webRadius), height - webRadius);
+
+            drawFlatSpiderWeb({ x: cx, y: cy }, col, web.growScale, alpha);
         }
-        
-        // Once stuck timer expires, dissolve the web
+
+        // ── Remove and dissolve once timer runs out ──
         if (web.stuckTimer <= 0) {
-            createWebParticles(web.target, col, 8);
+            const webRadius = Math.min(width, height) * 0.28;
+            const cx = Math.min(Math.max(web.target.x, webRadius), width  - webRadius);
+            const cy = Math.min(Math.max(web.target.y, webRadius), height - webRadius);
+            createWebParticles({ x: cx, y: cy }, web.color, 12);
             thrownWebs.splice(i, 1);
         }
     }
-    
-    // 2. Update and draw web debris particles
+
+    ctx.restore();
+
+    // ── 2. Web debris particles drawn on mainCanvas ───────────────────────────
+    ctx.save();
     for (let i = webParticles.length - 1; i >= 0; i--) {
         const wp = webParticles[i];
         wp.x += wp.vx;
         wp.y += wp.vy;
-        wp.vy += 0.25; // Gravity
-        wp.life -= 0.035;
+        wp.vy += 0.25; // gravity
+        wp.life -= 0.025;
         if (wp.life <= 0) {
             webParticles.splice(i, 1);
         } else {
@@ -668,7 +723,7 @@ function updateAndDrawWebs(dt) {
             ctx.fill();
         }
     }
-    
+    ctx.globalAlpha = 1.0;
     ctx.restore();
 }
 
