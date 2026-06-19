@@ -149,6 +149,88 @@
             text-shadow: 0 0 10px white;
         }
 
+        /* ── Spider HUD ──────────────────────────────────────────────────── */
+        #spiderHud {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            z-index: 10;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            pointer-events: none;
+        }
+
+        .spider-panel {
+            background: rgba(5, 8, 20, 0.65);
+            backdrop-filter: blur(18px);
+            -webkit-backdrop-filter: blur(18px);
+            border: 1px solid rgba(213, 244, 255, 0.25);
+            border-radius: 12px;
+            padding: 14px 20px;
+            box-shadow: 0 0 24px rgba(213, 244, 255, 0.08), 0 10px 40px rgba(0,0,0,0.6);
+            min-width: 210px;
+        }
+
+        .spider-title {
+            font-size: 0.7rem;
+            letter-spacing: 3px;
+            text-transform: uppercase;
+            color: rgba(213, 244, 255, 0.5);
+            margin-bottom: 12px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid rgba(213, 244, 255, 0.12);
+        }
+
+        .spider-stat {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 9px;
+            font-size: 0.85rem;
+            color: rgba(255, 255, 255, 0.65);
+            gap: 12px;
+        }
+        .spider-stat:last-child { margin-bottom: 0; }
+
+        .spider-val {
+            font-weight: 700;
+            color: #d5f4ff;
+            text-shadow: 0 0 10px rgba(213, 244, 255, 0.7);
+            font-family: 'Courier New', monospace;
+            font-size: 0.88rem;
+        }
+
+        .spider-val.status-ready    { color: #00ffaa; text-shadow: 0 0 10px rgba(0,255,170,0.7); }
+        .spider-val.status-thwip    { color: #ff6b6b; text-shadow: 0 0 12px rgba(255,107,107,0.9); animation: statusPulse 0.3s ease infinite alternate; }
+        .spider-val.status-idle     { color: rgba(213,244,255,0.4); text-shadow: none; }
+
+        .live-dot {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            margin-right: 6px;
+            background: #ff4444;
+            box-shadow: 0 0 8px #ff4444;
+            animation: livePulse 0.9s ease-in-out infinite;
+            vertical-align: middle;
+        }
+        .live-dot.idle {
+            background: rgba(213,244,255,0.2);
+            box-shadow: none;
+            animation: none;
+        }
+
+        @keyframes livePulse {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50%       { opacity: 0.4; transform: scale(0.75); }
+        }
+        @keyframes statusPulse {
+            from { opacity: 1; }
+            to   { opacity: 0.6; }
+        }
+
         /* Start Overlay */
         #startOverlay {
             position: absolute;
@@ -198,7 +280,7 @@
         <canvas id="mainCanvas"></canvas>
     </div>
 
-    <!-- UI Overlay -->
+    <!-- Generic UI Overlay (hidden in Spider mode) -->
     <div id="hud" class="hidden">
         <div class="panel">
             <div class="stat">Hands Detected: <span class="val" id="ui-hands">0</span></div>
@@ -207,6 +289,22 @@
         <div class="panel">
             <div class="stat">Gesture: <span class="val" id="ui-gesture">None</span></div>
             <div class="stat">Spread: <span class="val" id="ui-spread">0%</span></div>
+        </div>
+    </div>
+
+    <!-- Spider Mode HUD (shown only in Spider theme) -->
+    <div id="spiderHud" style="display:none;">
+        <div class="spider-panel">
+            <div class="spider-title">🕷 Spider-Man AR</div>
+            <div class="spider-stat">Targets Tracked <span class="spider-val" id="sp-targets">0</span></div>
+            <div class="spider-stat">Web Status      <span class="spider-val status-ready" id="sp-status">READY</span></div>
+            <div class="spider-stat">Gesture         <span class="spider-val" id="sp-gesture">—</span></div>
+            <div class="spider-stat">Webs Fired      <span class="spider-val" id="sp-fired">0</span></div>
+            <div class="spider-stat">Web Active
+                <span class="spider-val" id="sp-active">
+                    <span class="live-dot idle" id="sp-dot"></span><span id="sp-active-text">IDLE</span>
+                </span>
+            </div>
         </div>
     </div>
 
@@ -262,6 +360,7 @@ const FINGER_TIPS = [4, 8, 12, 16, 20];
 let thrownWebs = [];
 let webParticles = [];
 let lastThwipState = [false, false];
+let websFired = 0;
 
 
 // Matrix Background
@@ -270,15 +369,43 @@ const fontSize = 16;
 let maxColumns = 0;
 
 // Audio Node References
-let audioCtx = null;
-let humOsc = null;
-let humGain = null;
+let audioCtx    = null;
+let humOsc      = null;
+let humGain     = null;
+let masterGain  = null;
+let compressor  = null;
 
-// UI Elements
+// Spider Beat Sequencer State
+let beatSchedulerTimer = null;
+let beatStep           = 0;
+let nextBeatTime       = 0;
+const BEAT_BPM         = 88;
+const STEP_DUR         = (60 / BEAT_BPM) / 4;   // 16th-note duration in seconds
+const LOOKAHEAD_MS     = 25;                      // scheduler interval
+const SCHEDULE_AHEAD   = 0.1;                     // schedule 100ms ahead
+
+// 16-step patterns  (1 = hit, 0 = rest)
+const PAT_KICK  = [1,0,0,0, 0,1,0,0, 1,0,0,1, 0,1,0,0];
+const PAT_SNARE = [0,0,0,0, 1,0,0,0, 0,0,0,0, 1,0,0,0];
+const PAT_HAT   = [1,0,1,0, 1,0,1,0, 1,0,1,0, 1,0,1,0];
+const PAT_OHAT  = [0,0,0,0, 0,0,1,0, 0,0,0,0, 0,0,1,0];
+// Bass frequencies (Hz), 0 = rest — a simple descending/resolving hook
+const PAT_BASS  = [82,0,0,82, 110,0,98,0, 82,0,0,98, 110,0,0,0];
+
+// Generic UI Elements
 const uiHands = document.getElementById('ui-hands');
 const uiFps = document.getElementById('ui-fps');
 const uiGesture = document.getElementById('ui-gesture');
 const uiSpread = document.getElementById('ui-spread');
+
+// Spider HUD Elements
+const spiderHud    = document.getElementById('spiderHud');
+const spTargets    = document.getElementById('sp-targets');
+const spStatus     = document.getElementById('sp-status');
+const spGesture    = document.getElementById('sp-gesture');
+const spFired      = document.getElementById('sp-fired');
+const spDot        = document.getElementById('sp-dot');
+const spActiveText = document.getElementById('sp-active-text');
 
 /**
  * INITIALIZATION
@@ -306,6 +433,22 @@ document.querySelectorAll('.theme-btn').forEach(btn => {
         e.target.classList.add('active');
         currentTheme = e.target.getAttribute('data-theme');
         document.documentElement.style.setProperty('--accent', themes[currentTheme](0, 1, 1));
+
+        // Toggle which HUD is visible
+        const isSpider = currentTheme === 'Spider';
+        document.getElementById('hud').style.opacity       = isSpider ? '0' : '';
+        document.getElementById('hud').style.pointerEvents = isSpider ? 'none' : '';
+        spiderHud.style.display = isSpider ? 'block' : 'none';
+
+        // Start / stop Spider-Verse background music
+        if (isSpider) {
+            startSpiderMusic();
+        } else {
+            stopSpiderMusic();
+        }
+
+        // Reset webs-fired counter when leaving Spider mode
+        if (!isSpider) websFired = 0;
     });
 });
 
@@ -326,22 +469,201 @@ document.getElementById('startBtn').addEventListener('click', () => {
 function initAudio() {
     try {
         audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-        
-        // Continuous Hum
-        humOsc = audioCtx.createOscillator();
+
+        // Master chain: all audio runs through compressor → master gain
+        compressor = audioCtx.createDynamicsCompressor();
+        compressor.threshold.value = -18;
+        compressor.knee.value      = 10;
+        compressor.ratio.value     = 4;
+        compressor.attack.value    = 0.003;
+        compressor.release.value   = 0.15;
+
+        masterGain = audioCtx.createGain();
+        masterGain.gain.value = 0.82;
+
+        compressor.connect(masterGain);
+        masterGain.connect(audioCtx.destination);
+
+        // Continuous Hum (connects into compressor)
+        humOsc  = audioCtx.createOscillator();
         humGain = audioCtx.createGain();
-        
         humOsc.type = 'sine';
         humOsc.frequency.value = 100;
-        
-        humGain.gain.value = 0; // Mute until hands are seen
-        
+        humGain.gain.value = 0;
         humOsc.connect(humGain);
-        humGain.connect(audioCtx.destination);
+        humGain.connect(compressor);
         humOsc.start();
     } catch(e) {
         console.error("Web Audio API failed", e);
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  SPIDER-VERSE BEAT ENGINE
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Deep 808-style kick: sine sweep + sub-click */
+function beatKick(t) {
+    const osc  = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(180, t);
+    osc.frequency.exponentialRampToValueAtTime(38, t + 0.35);
+    gain.gain.setValueAtTime(1.0, t);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + 0.5);
+    osc.connect(gain); gain.connect(compressor);
+    osc.start(t); osc.stop(t + 0.55);
+
+    // Click transient
+    const click = audioCtx.createOscillator();
+    const cg    = audioCtx.createGain();
+    click.type = 'triangle';
+    click.frequency.value = 800;
+    cg.gain.setValueAtTime(0.35, t);
+    cg.gain.exponentialRampToValueAtTime(0.001, t + 0.03);
+    click.connect(cg); cg.connect(compressor);
+    click.start(t); click.stop(t + 0.04);
+}
+
+/** Snappy snare: bandpass noise + tone */
+function beatSnare(t) {
+    const bufSize = Math.floor(audioCtx.sampleRate * 0.2);
+    const buf     = audioCtx.createBuffer(1, bufSize, audioCtx.sampleRate);
+    const data    = buf.getChannelData(0);
+    for (let i = 0; i < bufSize; i++) data[i] = Math.random() * 2 - 1;
+
+    const noise = audioCtx.createBufferSource();
+    noise.buffer = buf;
+
+    const bp = audioCtx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.frequency.value = 2400;
+    bp.Q.value = 0.8;
+
+    const ng = audioCtx.createGain();
+    ng.gain.setValueAtTime(0.55, t);
+    ng.gain.exponentialRampToValueAtTime(0.001, t + 0.18);
+
+    noise.connect(bp); bp.connect(ng); ng.connect(compressor);
+    noise.start(t); noise.stop(t + 0.2);
+
+    // Body tone
+    const body = audioCtx.createOscillator();
+    const bg   = audioCtx.createGain();
+    body.type = 'triangle';
+    body.frequency.setValueAtTime(200, t);
+    body.frequency.exponentialRampToValueAtTime(80, t + 0.1);
+    bg.gain.setValueAtTime(0.3, t);
+    bg.gain.exponentialRampToValueAtTime(0.001, t + 0.12);
+    body.connect(bg); bg.connect(compressor);
+    body.start(t); body.stop(t + 0.15);
+}
+
+/** Closed hi-hat: very short high-freq noise */
+function beatHiHat(t, open = false) {
+    const bufSize = Math.floor(audioCtx.sampleRate * (open ? 0.22 : 0.05));
+    const buf     = audioCtx.createBuffer(1, bufSize, audioCtx.sampleRate);
+    const data    = buf.getChannelData(0);
+    for (let i = 0; i < bufSize; i++) data[i] = Math.random() * 2 - 1;
+
+    const noise = audioCtx.createBufferSource();
+    noise.buffer = buf;
+
+    const hp = audioCtx.createBiquadFilter();
+    hp.type = 'highpass';
+    hp.frequency.value = 8000;
+
+    const hg = audioCtx.createGain();
+    const dur = open ? 0.22 : 0.05;
+    hg.gain.setValueAtTime(open ? 0.18 : 0.12, t);
+    hg.gain.exponentialRampToValueAtTime(0.001, t + dur);
+
+    noise.connect(hp); hp.connect(hg); hg.connect(compressor);
+    noise.start(t); noise.stop(t + dur + 0.01);
+}
+
+/** Synth bass note: square wave with low-pass */
+function beatBass(t, freq) {
+    const osc  = audioCtx.createOscillator();
+    const lp   = audioCtx.createBiquadFilter();
+    const gain = audioCtx.createGain();
+
+    osc.type = 'square';
+    osc.frequency.value = freq;
+
+    lp.type = 'lowpass';
+    lp.frequency.setValueAtTime(400, t);
+    lp.frequency.exponentialRampToValueAtTime(180, t + 0.12);
+    lp.Q.value = 3;
+
+    gain.gain.setValueAtTime(0.42, t);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + 0.22);
+
+    osc.connect(lp); lp.connect(gain); gain.connect(compressor);
+    osc.start(t); osc.stop(t + 0.25);
+}
+
+/** Eerie Spider pad: detuned sine chords, slow attack */
+let padNodes = [];
+function startSpiderPad() {
+    stopSpiderPad();
+    // E minor triad — Emin: E2(82) G2(98) B2(123)
+    const freqs = [82, 98, 123, 164];  // + octave E3
+    freqs.forEach((f, i) => {
+        const osc  = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = 'sine';
+        osc.frequency.value = f + (Math.random() - 0.5) * 0.5; // tiny detune
+        gain.gain.setValueAtTime(0, audioCtx.currentTime);
+        gain.gain.linearRampToValueAtTime(0.04, audioCtx.currentTime + 2.5); // slow fade-in
+        osc.connect(gain);
+        gain.connect(compressor);
+        osc.start();
+        padNodes.push({ osc, gain });
+    });
+}
+function stopSpiderPad() {
+    padNodes.forEach(({ osc, gain }) => {
+        try {
+            gain.gain.setTargetAtTime(0, audioCtx.currentTime, 0.3);
+            osc.stop(audioCtx.currentTime + 1);
+        } catch(e) {}
+    });
+    padNodes = [];
+}
+
+/** The main beat scheduler — called on a setInterval */
+function scheduleBeat() {
+    while (nextBeatTime < audioCtx.currentTime + SCHEDULE_AHEAD) {
+        // Kick
+        if (PAT_KICK[beatStep])  beatKick(nextBeatTime);
+        // Snare
+        if (PAT_SNARE[beatStep]) beatSnare(nextBeatTime);
+        // Hi-hat
+        if (PAT_HAT[beatStep])   beatHiHat(nextBeatTime, PAT_OHAT[beatStep] === 1);
+        // Bass
+        const bf = PAT_BASS[beatStep];
+        if (bf) beatBass(nextBeatTime, bf);
+
+        nextBeatTime += STEP_DUR;
+        beatStep = (beatStep + 1) % 16;
+    }
+}
+
+function startSpiderMusic() {
+    if (!audioCtx || beatSchedulerTimer) return;
+    beatStep     = 0;
+    nextBeatTime = audioCtx.currentTime + 0.05; // tiny lead-in
+    beatSchedulerTimer = setInterval(scheduleBeat, LOOKAHEAD_MS);
+    startSpiderPad();
+}
+
+function stopSpiderMusic() {
+    if (beatSchedulerTimer) {
+        clearInterval(beatSchedulerTimer);
+        beatSchedulerTimer = null;
+    }
+    stopSpiderPad();
 }
 
 function triggerZap() {
@@ -832,15 +1154,14 @@ function detectGestures() {
         const index = hand[8];
         const dist = getDist(thumb, index);
         
-        const isPinching = dist < 0.05; // 5% of screen screen distance
+        const isPinching = dist < 0.05;
         
         if (isPinching && !lastPinchState[idx]) {
             const midpoint = {
-                x: (thumb.x + index.x) / 2, 
+                x: (thumb.x + index.x) / 2,
                 y: (thumb.y + index.y) / 2
             };
             createShockwave(mapToCanvas(midpoint), themes[currentTheme](time, 1, 1));
-            triggerZap();
             uiGesture.innerText = "PINCH !";
         }
         lastPinchState[idx] = isPinching;
@@ -850,9 +1171,52 @@ function detectGestures() {
         if (isThwiping && !lastThwipState[idx]) {
             shootWeb(hand, idx);
             triggerThwipSound();
+            websFired++;
         }
         lastThwipState[idx] = isThwiping;
     });
+
+    // ── Update Spider HUD ────────────────────────────────────────────────────
+    if (currentTheme === 'Spider') {
+        // Targets Tracked
+        spTargets.textContent = currentHands.length;
+
+        // Gesture label
+        const isThwipping = lastThwipState.includes(true);
+        const isPinching2 = lastPinchState.includes(true);
+        if (isThwipping) {
+            spGesture.textContent = 'THWIP ✦';
+        } else if (isPinching2) {
+            spGesture.textContent = 'PINCH';
+        } else if (currentHands.length > 0) {
+            const spread = getDist(currentHands[0][8], currentHands[0][20]);
+            spGesture.textContent = spread * 300 > 50 ? 'OPEN HAND' : 'FIST';
+        } else {
+            spGesture.textContent = '—';
+        }
+
+        // Web Status
+        if (isThwipping) {
+            spStatus.textContent = 'THWIPPING!';
+            spStatus.className = 'spider-val status-thwip';
+        } else {
+            spStatus.textContent = 'READY';
+            spStatus.className = 'spider-val status-ready';
+        }
+
+        // Webs Fired
+        spFired.textContent = websFired;
+
+        // Web Active
+        const hasLiveWeb = thrownWebs.length > 0;
+        if (hasLiveWeb) {
+            spDot.className = 'live-dot';
+            spActiveText.textContent = 'LIVE';
+        } else {
+            spDot.className = 'live-dot idle';
+            spActiveText.textContent = 'IDLE';
+        }
+    }
 
     // Spread Percentage roughly estimated by distance from Palm(0) to Index(8) and Pinky(20)
     if (currentHands[0]) {
